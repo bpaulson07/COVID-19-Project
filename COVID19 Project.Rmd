@@ -1,0 +1,138 @@
+---
+title: "COVID Project"
+output:
+  pdf_document: default
+  word_document: default
+  html_document: default
+date: "2026-08-09"
+---
+## Import and Setup
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+global_cases <- read_csv("https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_confirmed_global.csv")
+global_deaths <- read_csv("https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_deaths_global.csv")
+US_cases <- read_csv("https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_confirmed_US.csv")
+US_deaths <- read_csv("https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_deaths_US.csv")
+```
+
+## Introduction
+
+This report analyzes the COVID-19 time series dataset provided by Johns Hopkins University's Center for Systems Science and Engineering (JHU CSSE). It was sourced from their public GitHub repository. The dataset includes daily cumulative confirmed cases and deaths, reported globally and at the US county level, from January 2020 onward.
+
+This analysis addresses two questions:
+1. When did global COVID-19 cases grow fastest, and what did that peak look like?
+2. Do case counts from two weeks prior predict daily new deaths, testing whether there's a meaningful lag between infection and death?
+
+Unlike the in-class lecture, which modeled same-day cases against deaths using a simple linear model, this analysis introduces a time lag to test whether cases precede deaths by roughly two weeks — closer to the actual clinical progression of the disease.
+
+## Tidy the Data
+
+
+```{r}
+global_cases_long <- global_cases %>%
+  pivot_longer(cols = -c(`Province/State`, `Country/Region`, Lat, Long),
+               names_to = "date", values_to = "cases") %>%
+  mutate(date = mdy(date))
+
+global_deaths_long <- global_deaths %>%
+  pivot_longer(cols = -c(`Province/State`, `Country/Region`, Lat, Long),
+               names_to = "date", values_to = "deaths") %>%
+  mutate(date = mdy(date))
+
+global_totals <- global_cases_long %>%
+  group_by(date) %>%
+  summarize(cases = sum(cases, na.rm = TRUE)) %>%
+  full_join(
+    global_deaths_long %>% group_by(date) %>% summarize(deaths = sum(deaths, na.rm = TRUE)),
+    by = "date"
+  )
+
+glimpse(global_totals)
+```
+
+## Analysis #1
+
+
+```{r}
+global_growth <- global_totals %>%
+  arrange(date) %>%
+  mutate(
+    new_cases = cases - lag(cases),
+    growth_rate = (new_cases - lag(new_cases)) / lag(new_cases) * 100,
+    new_deaths = deaths - lag(deaths)
+  )
+
+global_growth %>%
+  filter(new_cases == max(new_cases, na.rm = TRUE))
+```
+The data shows a single dominant peak in global case growth on January 19, 2022, with just over 4.08 million new cases reported worldwide in one day. This is consistent with the timing of the Omicron variant's global spread. This far exceeds any prior wave in the dataset, indicating Omicron's transmissibility drove new infections at a scale not seen earlier in the pandemic.
+
+
+## Visualizations #1
+
+The chart below shows this pattern visually. It has a relatively low, gradual case growth through 2020 and most of 2021, followed by a sharp, narrow spike in early 2022 that dwarfs earlier waves.
+
+```{r}
+ggplot(global_growth, aes(x = date, y = new_cases)) +
+  geom_line() +
+  labs(title = "Global New COVID-19 Cases Per Day", x = "Date", y = "New Cases")
+```
+
+## Analysis #2
+
+
+```{r}
+lag_days <- 14
+
+global_lagged <- global_growth %>%
+  mutate(cases_lagged = lag(new_cases, lag_days)) %>%
+  filter(!is.na(cases_lagged), !is.na(deaths))
+
+lag_model <- lm(new_deaths ~ cases_lagged, data = global_lagged)
+summary(lag_model)
+```
+The model shows a statistically significant positive relationship between case counts 14 days prior and new deaths based on the p value less than 2^e-16. Each additional case roughly two weeks earlier corresponds to a small but real increase in deaths today, consistent with the expected clinical progression from infection to death. However, the R² of 0.06 indicates this lagged case count explains about 6% of the variation in daily deaths, meaning the relationship is real but weak on its own. Rather other factors not captured in this simple model are doing most of the work in determining death counts.
+
+## Visualizations #2
+
+The scatter plot below illustrates this directly. While there's a visible upward trend (the red regression line), the wide spread of points around that line reflects the low R². Thus the lagged case count alone doesn't tightly predict deaths.
+
+```{r}
+ggplot(global_lagged, aes(x = cases_lagged, y = new_deaths)) +
+  geom_point(alpha = 0.3) +
+  geom_smooth(method = "lm", color = "red") +
+  labs(
+    title = "New Deaths vs. Cases 14 Days Prior",
+    x = "New Cases (14-day lag)",
+    y = "New Deaths"
+  )
+```
+
+
+## Bias Discussion
+1. Source bias — Because this data set aggregates data from dozens of different national health bodies and countries, reporting protocols vary significantly. Different countries applied vastly different criteria for what constituted a COVID-19 case and how COVID-19 deaths were classified. As such, if certain nations under tested during the initial surge due to limited testing infrastructure and expanded testing capacity later in the pandemic, the growth rates calculated or a global case surge may be artificially skewed to later in the data set. The observed peak reflects reported administrative cases rather than true biological infections.
+
+2. Missing/changing data bias: Over the multi-year timeline, reporting standards frequently shifted. Some nations transitioned from daily reporting to weekly reporting, while others changed death classification definitions or went back and updated historical totals. Calculating daily new cases relies on smooth, continuous reporting. When a health authority dumps a backlog of unreported cases from past weeks or months into a single day's total, it creates a massive, artificial spike in the growth rate that does not represent true new daily cases.
+
+3. Own Analyst Bias: I chose to look at a 14-day time lag which was guided by early estimates of the disease progression. The combination of an average incubation period of 5 days plus the typical duration from symptom onset to severe illness or death of roughly 1 to 2 weeks. While this timeframe was based on researchers' findings, it was also a convenient round number, 14 days or 2 weeks. Evaluating multiple lag intervals in addition to the 14 days, such as 7, 10, or 21 days, or fitting a distributed lag model would provide a better assessment rather than assuming a fixed two-week delay across all waves and variants.
+
+4. Model bias/limitation — A R^2 value of approximately 0.06 indicates that the 14-day lagged daily case count explains around only 6% of the variance in daily new deaths.This result means we cannot claim a strong predictive or direct causal relationship between lagged cases and daily deaths using this simple linear model alone. The weak correlation underscores that daily mortality was heavily influenced by unmeasured variables, such as, age of the infected populations, access to vaccination coverage, healthcare system capacity, and among others. 
+
+
+## Conclusion
+
+This analysis evaluated the global COVID-19 time series data from Johns Hopkins University to examine global growth patterns and assess whether a 14-day time lag in daily cases better predicts daily mortality compared to same-day metrics.
+
+### Key Takeaway Points:
+1. **Epidemiological Progression:** Introducing a 14-day lag aligns more closely with the known biological timeline of infection and disease progression than evaluating same-day cases against deaths.
+2. **Model Limitations:** The low variance R^2 value of 0.06 demonstrates that daily case counts alone are an insufficient predictor of daily deaths. Unmeasured variables, such as vaccination rollouts, hospital capacity and overall care, and others, appeared to play a significant role in this variability.
+3. **Data Integrity:** Aggregated global datasets are subject to administrative reporting artifacts, such as retroactive data dumps and inconsistent cross-national testing definitions, which must be considered when interpreting short-term trends.
+
+### Future Work
+Future modeling efforts could be improved by incorporating distributed lag models (evaluating a range of lags from 7 to 28 days), segmenting the data by specific pandemic waves or variants, and including additional explanatory variables such as vaccination rates and demographic age distribution.
+
+```{r}
+sessionInfo()
+```
+
